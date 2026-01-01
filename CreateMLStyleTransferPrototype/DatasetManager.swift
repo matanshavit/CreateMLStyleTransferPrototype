@@ -10,8 +10,7 @@ import Combine
 @MainActor
 class DatasetManager: ObservableObject {
     enum DatasetSource: String, CaseIterable, Identifiable {
-        case apple = "Apple Built-in (~600 images)"
-        case coco = "COCO Dataset (subset)"
+        case coco = "COCO Dataset (~600 images)"
 
         var id: String { rawValue }
     }
@@ -23,27 +22,14 @@ class DatasetManager: ObservableObject {
         case error(String)
     }
 
-    @Published var appleDatasetState: DatasetState = .notDownloaded
     @Published var cocoDatasetState: DatasetState = .notDownloaded
-    @Published var selectedSource: DatasetSource = .apple
+    @Published var selectedSource: DatasetSource = .coco
 
     private let fileManager = FileManager.default
     private var cocoDownloader: COCODownloader?
 
     var contentDirectoryURL: URL? {
-        switch selectedSource {
-        case .apple:
-            return appleContentDirectory
-        case .coco:
-            return cocoContentDirectory
-        }
-    }
-
-    private var appleContentDirectory: URL? {
-        guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            return nil
-        }
-        return appSupport.appendingPathComponent("CreateMLStyleTransferPrototype/AppleContent")
+        return cocoContentDirectory
     }
 
     private var cocoContentDirectory: URL? {
@@ -58,13 +44,6 @@ class DatasetManager: ObservableObject {
     }
 
     func checkExistingDatasets() {
-        // Check Apple dataset
-        if let dir = appleContentDirectory, fileManager.fileExists(atPath: dir.path) {
-            let count = countImages(in: dir)
-            appleDatasetState = count > 0 ? .ready(imageCount: count) : .notDownloaded
-        }
-
-        // Check COCO dataset
         if let dir = cocoContentDirectory, fileManager.fileExists(atPath: dir.path) {
             let count = countImages(in: dir)
             cocoDatasetState = count > 0 ? .ready(imageCount: count) : .notDownloaded
@@ -79,38 +58,6 @@ class DatasetManager: ObservableObject {
         return contents.filter { url in
             extensions.contains(url.pathExtension.lowercased())
         }.count
-    }
-
-    func downloadAppleDataset() {
-        guard let targetDir = appleContentDirectory else {
-            appleDatasetState = .error("Could not create directory")
-            return
-        }
-
-        // Show indeterminate loading state (Apple API doesn't provide progress)
-        appleDatasetState = .downloading(progress: nil)
-
-        // Run download on background thread to avoid blocking UI
-        Task.detached { [weak self] in
-            do {
-                // Create directory if needed
-                try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
-
-                // Use MLStyleTransfer's built-in asset download
-                try await MLStyleTransfer.downloadAssets()
-
-                // Update state on main actor
-                await MainActor.run {
-                    // Apple's downloadAssets() doesn't copy to a user-accessible location
-                    // The assets are available internally for training
-                    self?.appleDatasetState = .ready(imageCount: 600)
-                }
-            } catch {
-                await MainActor.run {
-                    self?.appleDatasetState = .error("Download failed: \(error.localizedDescription)")
-                }
-            }
-        }
     }
 
     func downloadCOCODataset() {

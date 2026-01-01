@@ -73,13 +73,6 @@ struct ContentView: View {
 
     private var datasetSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Picker("Source", selection: $datasetManager.selectedSource) {
-                ForEach(DatasetManager.DatasetSource.allCases) { source in
-                    Text(source.rawValue).tag(source)
-                }
-            }
-            .pickerStyle(.segmented)
-
             HStack {
                 datasetStatusView
                 Spacer()
@@ -90,24 +83,18 @@ struct ContentView: View {
 
     @ViewBuilder
     private var datasetStatusView: some View {
-        let state = datasetManager.selectedSource == .apple
-            ? datasetManager.appleDatasetState
-            : datasetManager.cocoDatasetState
-
-        switch state {
+        switch datasetManager.cocoDatasetState {
         case .notDownloaded:
             Label("Not downloaded", systemImage: "xmark.circle")
                 .foregroundColor(.secondary)
         case .downloading(let progress):
             if let progress = progress {
-                // Determinate progress (COCO download)
                 HStack {
                     ProgressView(value: progress)
                         .frame(width: 100)
                     Text("\(Int(progress * 100))%")
                 }
             } else {
-                // Indeterminate progress (Apple download)
                 HStack {
                     ProgressView()
                         .scaleEffect(0.8)
@@ -125,25 +112,13 @@ struct ContentView: View {
 
     @ViewBuilder
     private var downloadButton: some View {
-        let state = datasetManager.selectedSource == .apple
-            ? datasetManager.appleDatasetState
-            : datasetManager.cocoDatasetState
-
-        if case .notDownloaded = state {
+        if case .notDownloaded = datasetManager.cocoDatasetState {
             Button("Download") {
-                if datasetManager.selectedSource == .apple {
-                    datasetManager.downloadAppleDataset()
-                } else {
-                    datasetManager.downloadCOCODataset()
-                }
+                datasetManager.downloadCOCODataset()
             }
-        } else if case .error = state {
+        } else if case .error = datasetManager.cocoDatasetState {
             Button("Retry") {
-                if datasetManager.selectedSource == .apple {
-                    datasetManager.downloadAppleDataset()
-                } else {
-                    datasetManager.downloadCOCODataset()
-                }
+                datasetManager.downloadCOCODataset()
             }
         }
     }
@@ -248,13 +223,10 @@ struct ContentView: View {
 
     private var canStartTraining: Bool {
         let datasetReady: Bool
-        switch datasetManager.selectedSource {
-        case .apple:
-            if case .ready = datasetManager.appleDatasetState { datasetReady = true }
-            else { datasetReady = false }
-        case .coco:
-            if case .ready = datasetManager.cocoDatasetState { datasetReady = true }
-            else { datasetReady = false }
+        if case .ready = datasetManager.cocoDatasetState {
+            datasetReady = true
+        } else {
+            datasetReady = false
         }
 
         return styleImage != nil && datasetReady && config.isValid && !trainer.isTraining
