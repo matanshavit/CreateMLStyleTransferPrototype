@@ -99,10 +99,20 @@ struct ContentView: View {
             Label("Not downloaded", systemImage: "xmark.circle")
                 .foregroundColor(.secondary)
         case .downloading(let progress):
-            HStack {
-                ProgressView(value: progress)
-                    .frame(width: 100)
-                Text("\(Int(progress * 100))%")
+            if let progress = progress {
+                // Determinate progress (COCO download)
+                HStack {
+                    ProgressView(value: progress)
+                        .frame(width: 100)
+                    Text("\(Int(progress * 100))%")
+                }
+            } else {
+                // Indeterminate progress (Apple download)
+                HStack {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("Downloading...")
+                }
             }
         case .ready(let count):
             Label("\(count) images ready", systemImage: "checkmark.circle.fill")
@@ -121,22 +131,18 @@ struct ContentView: View {
 
         if case .notDownloaded = state {
             Button("Download") {
-                Task {
-                    if datasetManager.selectedSource == .apple {
-                        await datasetManager.downloadAppleDataset()
-                    } else {
-                        await datasetManager.downloadCOCODataset()
-                    }
+                if datasetManager.selectedSource == .apple {
+                    datasetManager.downloadAppleDataset()
+                } else {
+                    datasetManager.downloadCOCODataset()
                 }
             }
         } else if case .error = state {
             Button("Retry") {
-                Task {
-                    if datasetManager.selectedSource == .apple {
-                        await datasetManager.downloadAppleDataset()
-                    } else {
-                        await datasetManager.downloadCOCODataset()
-                    }
+                if datasetManager.selectedSource == .apple {
+                    datasetManager.downloadAppleDataset()
+                } else {
+                    datasetManager.downloadCOCODataset()
                 }
             }
         }

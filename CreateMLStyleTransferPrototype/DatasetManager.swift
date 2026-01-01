@@ -18,7 +18,7 @@ class DatasetManager: ObservableObject {
 
     enum DatasetState: Equatable {
         case notDownloaded
-        case downloading(progress: Double)
+        case downloading(progress: Double?)  // nil = indeterminate
         case ready(imageCount: Int)
         case error(String)
     }
@@ -28,7 +28,7 @@ class DatasetManager: ObservableObject {
     @Published var selectedSource: DatasetSource = .apple
 
     private let fileManager = FileManager.default
-    private var downloadTask: URLSessionDownloadTask?
+    private var cocoDownloader: COCODownloader?
 
     var contentDirectoryURL: URL? {
         switch selectedSource {
@@ -81,44 +81,39 @@ class DatasetManager: ObservableObject {
         }.count
     }
 
-    func downloadAppleDataset() async {
+    func downloadAppleDataset() {
         guard let targetDir = appleContentDirectory else {
             appleDatasetState = .error("Could not create directory")
             return
         }
 
-        do {
-            // Create directory if needed
-            try fileManager.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        // Show indeterminate loading state (Apple API doesn't provide progress)
+        appleDatasetState = .downloading(progress: nil)
 
-            appleDatasetState = .downloading(progress: 0)
+        // Run download on background thread to avoid blocking UI
+        Task.detached { [weak self] in
+            do {
+                // Create directory if needed
+                try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
 
-            // Use MLStyleTransfer's built-in asset download
-            // Note: This downloads to a temporary location, we'll need to copy
-            try await MLStyleTransfer.downloadAssets()
+                // Use MLStyleTransfer's built-in asset download
+                try await MLStyleTransfer.downloadAssets()
 
-            // The assets are downloaded to a system location
-            // We need to find them and copy to our directory
-            // For now, we'll use a workaround - the downloadAssets() makes them available
-            // for the training data source
-
-            appleDatasetState = .downloading(progress: 1.0)
-
-            // Verify download
-            let count = countImages(in: targetDir)
-            if count > 0 {
-                appleDatasetState = .ready(imageCount: count)
-            } else {
-                // Apple's downloadAssets() doesn't copy to a user-accessible location
-                // We'll handle this in the training phase by using the built-in option
-                appleDatasetState = .ready(imageCount: 600) // Approximate
+                // Update state on main actor
+                await MainActor.run {
+                    // Apple's downloadAssets() doesn't copy to a user-accessible location
+                    // The assets are available internally for training
+                    self?.appleDatasetState = .ready(imageCount: 600)
+                }
+            } catch {
+                await MainActor.run {
+                    self?.appleDatasetState = .error("Download failed: \(error.localizedDescription)")
+                }
             }
-        } catch {
-            appleDatasetState = .error("Download failed: \(error.localizedDescription)")
         }
     }
 
-    func downloadCOCODataset() async {
+    func downloadCOCODataset() {
         guard let targetDir = cocoContentDirectory else {
             cocoDatasetState = .error("Could not create directory")
             return
@@ -126,31 +121,88 @@ class DatasetManager: ObservableObject {
 
         do {
             try fileManager.createDirectory(at: targetDir, withIntermediateDirectories: true)
-            cocoDatasetState = .downloading(progress: 0)
+        } catch {
+            cocoDatasetState = .error("Could not create directory: \(error.localizedDescription)")
+            return
+        }
 
-            // COCO val2017 dataset URL
-            let cocoURL = URL(string: "http://images.cocodataset.org/zips/val2017.zip")!
+        cocoDatasetState = .downloading(progress: 0)
 
-            let (tempURL, _) = try await URLSession.shared.download(from: cocoURL) { [weak self] progress in
+        // COCO val2017 dataset URL
+        let cocoURL = URL(string: "http://images.cocodataset.org/zips/val2017.zip")!
+
+        // Use delegate-based download for real progress tracking
+        cocoDownloader = COCODownloader(
+            url: cocoURL,
+            targetDirectory: targetDir,
+            onProgress: { [weak self] progress in
                 Task { @MainActor in
                     self?.cocoDatasetState = .downloading(progress: progress)
                 }
+            },
+            onComplete: { [weak self] result in
+                Task { @MainActor in
+                    switch result {
+                    case .success(let count):
+                        self?.cocoDatasetState = .ready(imageCount: count)
+                    case .failure(let error):
+                        self?.cocoDatasetState = .error("Download failed: \(error.localizedDescription)")
+                    }
+                    self?.cocoDownloader = nil
+                }
             }
+        )
+        cocoDownloader?.start()
+    }
+}
 
-            // Unzip and extract first 600 images
-            try await extractCOCOImages(from: tempURL, to: targetDir, limit: 600)
+// MARK: - COCO Downloader with real progress tracking
 
-            // Clean up temp file
-            try? fileManager.removeItem(at: tempURL)
+private class COCODownloader: NSObject, URLSessionDownloadDelegate {
+    private let url: URL
+    private let targetDirectory: URL
+    private let onProgress: (Double) -> Void
+    private let onComplete: (Result<Int, Error>) -> Void
+    private var session: URLSession?
 
-            let count = countImages(in: targetDir)
-            cocoDatasetState = .ready(imageCount: count)
-        } catch {
-            cocoDatasetState = .error("Download failed: \(error.localizedDescription)")
+    init(url: URL, targetDirectory: URL, onProgress: @escaping (Double) -> Void, onComplete: @escaping (Result<Int, Error>) -> Void) {
+        self.url = url
+        self.targetDirectory = targetDirectory
+        self.onProgress = onProgress
+        self.onComplete = onComplete
+        super.init()
+    }
+
+    func start() {
+        let config = URLSessionConfiguration.default
+        session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+        session?.downloadTask(with: url).resume()
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        if totalBytesExpectedToWrite > 0 {
+            let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+            onProgress(progress)
         }
     }
 
-    private func extractCOCOImages(from zipURL: URL, to targetDir: URL, limit: Int) async throws {
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        do {
+            // Unzip and extract first 600 images
+            let count = try extractImages(from: location, to: targetDirectory, limit: 600)
+            onComplete(.success(count))
+        } catch {
+            onComplete(.failure(error))
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error = error {
+            onComplete(.failure(error))
+        }
+    }
+
+    private func extractImages(from zipURL: URL, to targetDir: URL, limit: Int) throws -> Int {
         // Use Process to unzip (macOS has built-in unzip)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
@@ -158,6 +210,8 @@ class DatasetManager: ObservableObject {
 
         try process.run()
         process.waitUntilExit()
+
+        let fileManager = FileManager.default
 
         // Limit to specified number of images
         if let contents = try? fileManager.contentsOfDirectory(at: targetDir, includingPropertiesForKeys: nil) {
@@ -167,25 +221,9 @@ class DatasetManager: ObservableObject {
                     try? fileManager.removeItem(at: imageURL)
                 }
             }
+            return min(images.count, limit)
         }
-    }
-}
 
-// URLSession extension for progress tracking
-extension URLSession {
-    func download(from url: URL, progressHandler: @escaping (Double) -> Void) async throws -> (URL, URLResponse) {
-        try await withCheckedThrowingContinuation { continuation in
-            let task = self.downloadTask(with: url) { url, response, error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else if let url = url, let response = response {
-                    continuation.resume(returning: (url, response))
-                }
-            }
-
-            // Note: For proper progress tracking, would need URLSessionDownloadDelegate
-            // Simplified here for prototype
-            task.resume()
-        }
+        return 0
     }
 }
