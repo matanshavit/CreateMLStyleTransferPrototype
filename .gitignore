@@ -1,0 +1,22 @@
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Trained models (large files)
+TrainedModels/
+*.mlmodel
+*.mlmodelc
+*.mlpackage
+
+# Temporary files
+*.swp
+*~
